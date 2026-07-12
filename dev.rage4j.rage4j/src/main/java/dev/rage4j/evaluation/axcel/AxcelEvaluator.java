@@ -73,7 +73,11 @@ public class AxcelEvaluator implements Evaluator
 		String context = getContext(sample) + "User: " + sample.getQuestion() + "\n";
 		String actualStDtPair = buildFewShotExemplars(context, sample.getAnswer());
 		AxcelResponse response = bot.evaluate(actualStDtPair);
-		List<AxcelFactEvaluation> parsedFacts = (response == null || response.getFacts() == null) ? List.of() : response.getFacts();
+		if (response == null || response.getFacts() == null)
+		{
+			throw new IllegalStateException("Axcel bot returned no response or no facts to evaluate.");
+		}
+		List<AxcelFactEvaluation> parsedFacts = response.getFacts();
 		double score = normalizeScore(parsedFacts);
 		logDebug(parsedFacts);
 		log.info("Axcel evaluation completed. Score: {}", score);

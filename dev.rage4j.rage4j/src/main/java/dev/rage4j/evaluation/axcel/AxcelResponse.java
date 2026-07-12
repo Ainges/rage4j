@@ -9,8 +9,9 @@ import java.util.List;
  * {@link dev.rage4j.evaluation.model.ArrayResponse} idiom used elsewhere in
  * RAGE4j: Langchain4j (and its Quarkus integration) can generate output-format
  * instructions for a plain POJO return type, but not for a raw
- * {@code Collection<Pojo>} return type. Class is initiated automatically and is
- * needed only for service purposes.
+ * {@code Collection<Pojo>} return type. Langchain4j instantiates this wrapper
+ * automatically when parsing the AiService response; it carries no behaviour of
+ * its own.
  */
 public class AxcelResponse
 {
