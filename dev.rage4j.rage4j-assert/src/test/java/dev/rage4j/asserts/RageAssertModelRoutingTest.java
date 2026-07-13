@@ -13,7 +13,7 @@ class RageAssertModelRoutingTest
 	@Test
 	void assertionsUseJudgeModelInsteadOfEvaluatedModel()
 	{
-		ScriptedChatModel judgeModel = new ScriptedChatModel("{\"items\":[]}");
+		ScriptedChatModel judgeModel = new ScriptedChatModel("{\"truePositives\":[],\"falsePositives\":[],\"falseNegatives\":[]}");
 		RageAssert rageAssert = new RageAssert(new FailingChatModel(), judgeModel);
 
 		rageAssert.given()
@@ -24,7 +24,7 @@ class RageAssertModelRoutingTest
 			.then()
 			.assertAnswerCorrectness(0.0);
 
-		assertEquals(3, judgeModel.calls);
+		assertEquals(1, judgeModel.calls);
 	}
 
 	private static final class ScriptedChatModel implements ChatModel

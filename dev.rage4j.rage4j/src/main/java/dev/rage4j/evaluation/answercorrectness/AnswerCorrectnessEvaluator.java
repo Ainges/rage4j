@@ -4,17 +4,23 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.service.AiServices;
 import dev.rage4j.evaluation.Evaluation;
 import dev.rage4j.evaluation.Evaluator;
-import dev.rage4j.evaluation.model.ArrayResponse;
+import dev.rage4j.evaluation.model.ClaimClassification;
 import dev.rage4j.model.Sample;
 import org.apache.commons.math3.analysis.function.Divide;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
 /**
  * The {@code AnswerCorrectnessEvaluator} class evaluates the correctness of an
  * answer by comparing it to the ground truth using true positive, false
- * positive, and false negative claims. The result is expressed as an F1 score,
- * which balances precision and recall.
+ * positive, and false negative claims. The claims are extracted and partitioned
+ * in a single LLM call that assigns every claim to exactly one of the three
+ * sets, so the same fact cannot be counted twice. The result is expressed as an
+ * F1 score, which balances precision and recall.
  */
 public class AnswerCorrectnessEvaluator implements Evaluator
 {
@@ -82,12 +88,16 @@ public class AnswerCorrectnessEvaluator implements Evaluator
 		LOG.info("Ground truth: {}", groundTruth);
 		LOG.info("Answer: {}", answer);
 
-		ArrayResponse truePositiveClaims = bot.extractTruePositiveClaims(groundTruth, answer);
-		double truePositives = truePositiveClaims.getLength();
-		ArrayResponse falsePositiveClaims = bot.extractFalsePositiveClaims(groundTruth, answer);
-		double falsePositives = falsePositiveClaims.getLength();
-		ArrayResponse falseNegativeClaims = bot.extractFalseNegativeClaims(groundTruth, answer);
-		double falseNegatives = falseNegativeClaims.getLength();
+		ClaimClassification classification = bot.classifyClaims(groundTruth, answer);
+
+		String[] truePositiveClaims = orEmpty(classification.getTruePositives());
+		Set<String> truePositiveSet = new HashSet<>(Arrays.asList(truePositiveClaims));
+		String[] falsePositiveClaims = withoutTruePositives(orEmpty(classification.getFalsePositives()), truePositiveSet, "false positive");
+		String[] falseNegativeClaims = withoutTruePositives(orEmpty(classification.getFalseNegatives()), truePositiveSet, "false negative");
+
+		double truePositives = truePositiveClaims.length;
+		double falsePositives = falsePositiveClaims.length;
+		double falseNegatives = falseNegativeClaims.length;
 
 		if (truePositives == 0 && falsePositives == 0 && falseNegatives == 0)
 		{
@@ -96,9 +106,9 @@ public class AnswerCorrectnessEvaluator implements Evaluator
 		}
 		else
 		{
-			LOG.info("True positives: {}", (Object)truePositiveClaims.getItems());
-			LOG.info("False positives: {}", (Object)falsePositiveClaims.getItems());
-			LOG.info("False negatives: {}", (Object)falseNegativeClaims.getItems());
+			LOG.info("True positives: {}", (Object)truePositiveClaims);
+			LOG.info("False positives: {}", (Object)falsePositiveClaims);
+			LOG.info("False negatives: {}", (Object)falseNegativeClaims);
 		}
 
 		double denominator = truePositives + new Divide().value(falsePositives + falseNegatives, 2);
@@ -107,5 +117,28 @@ public class AnswerCorrectnessEvaluator implements Evaluator
 		LOG.info("Answer Correctness (F1) Metric: {}", f1Metric);
 
 		return new Evaluation(METRIC_NAME, f1Metric);
+	}
+
+	private static String[] orEmpty(String[] claims)
+	{
+		return claims == null ? new String[0] : claims;
+	}
+
+	/**
+	 * Removes claims that are already classified as true positives. The prompt
+	 * instructs the LLM to assign every claim to exactly one list, but nothing
+	 * structurally prevents it from repeating a true positive here. Such a
+	 * contradictory claim must not be counted against the score.
+	 */
+	private static String[] withoutTruePositives(String[] claims, Set<String> truePositiveSet, String listName)
+	{
+		String[] filtered = Arrays.stream(claims)
+			.filter(claim -> !truePositiveSet.contains(claim))
+			.toArray(String[]::new);
+		if (filtered.length < claims.length)
+		{
+			LOG.warn("Ignoring {} contradictory {} claim(s) already classified as true positive", claims.length - filtered.length, listName);
+		}
+		return filtered;
 	}
 }
