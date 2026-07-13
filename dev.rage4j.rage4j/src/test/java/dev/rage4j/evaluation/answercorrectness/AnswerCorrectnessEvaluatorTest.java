@@ -2,7 +2,7 @@ package dev.rage4j.evaluation.answercorrectness;
 
 import dev.rage4j.LoggingTestWatcher;
 import dev.rage4j.evaluation.Evaluation;
-import dev.rage4j.evaluation.model.ArrayResponse;
+import dev.rage4j.evaluation.model.ClaimClassification;
 import dev.rage4j.model.Sample;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,27 +43,77 @@ class AnswerCorrectnessEvaluatorTest
 	static Stream<Arguments> evaluateCorrectnessTestCases()
 	{
 		return Stream.of(
-			Arguments.of(1, 1, 0, 0.6667, "true and false positives"),
-			Arguments.of(0, 0, 0, 0.0, "no true/false positives or negatives"),
-			Arguments.of(1, 0, 0, 1.0, "only true positives"));
+			Arguments.of(
+				new String[] { "Paris is the capital of France" },
+				new String[] { "Paris is the largest city in France" },
+				new String[0],
+				0.6667, "true and false positives"),
+			Arguments.of(new String[0], new String[0], new String[0], 0.0, "no true/false positives or negatives"),
+			Arguments.of(new String[] { "Paris is the capital of France" }, new String[0], new String[0], 1.0, "only true positives"));
 	}
 
 	@ParameterizedTest(name = "evaluates correctly with {4}")
 	@MethodSource("evaluateCorrectnessTestCases")
-	void testEvaluateCorrectness(int truePositives, int falsePositives, int falseNegatives,
+	void testEvaluateCorrectness(String[] truePositives, String[] falsePositives, String[] falseNegatives,
 		double expectedScore, String scenario)
 	{
-		when(mockBot.extractTruePositiveClaims(GROUND_TRUTH, ANSWER))
-			.thenReturn(new ArrayResponse(new String[truePositives]));
-		when(mockBot.extractFalsePositiveClaims(GROUND_TRUTH, ANSWER))
-			.thenReturn(new ArrayResponse(new String[falsePositives]));
-		when(mockBot.extractFalseNegativeClaims(GROUND_TRUTH, ANSWER))
-			.thenReturn(new ArrayResponse(new String[falseNegatives]));
+		when(mockBot.classifyClaims(GROUND_TRUTH, ANSWER))
+			.thenReturn(new ClaimClassification(truePositives, falsePositives, falseNegatives));
 
 		Evaluation result = evaluator.evaluate(sample);
 
 		assertEquals("Answer correctness", result.getName());
 		assertEquals(expectedScore, result.getValue(), 0.001);
+	}
+
+	@Test
+	void testClaimReportedAsTruePositiveAndFalseNegativeIsNotDoubleCounted()
+	{
+		// The prompt instructs the LLM to assign every claim to exactly one
+		// list, but nothing structurally prevents it from repeating a true
+		// positive as a false negative. That is contradictory: a fact cannot
+		// be present in the answer (TP) and missing from it (FN) at the same
+		// time.
+		when(mockBot.classifyClaims(GROUND_TRUTH, ANSWER))
+			.thenReturn(new ClaimClassification(
+				new String[] { "Paris is the capital of France", "Paris is in France" },
+				new String[0],
+				new String[] { "Paris is in France" }));
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		// "Paris is in France" is already counted as a true positive, so the
+		// contradictory false negative must not lower the score:
+		// expected F1 = 1.0, not 2 / (2 + 0.5) = 0.8.
+		assertEquals(1.0, result.getValue(), 0.001);
+	}
+
+	@Test
+	void testClaimReportedAsTruePositiveAndFalsePositiveIsNotDoubleCounted()
+	{
+		when(mockBot.classifyClaims(GROUND_TRUTH, ANSWER))
+			.thenReturn(new ClaimClassification(
+				new String[] { "Paris is the capital of France" },
+				new String[] { "Paris is the capital of France" },
+				new String[0]));
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		// The contradictory false positive is already a true positive and must
+		// not lower the score: expected F1 = 1.0, not 1 / (1 + 0.5) = 0.6667.
+		assertEquals(1.0, result.getValue(), 0.001);
+	}
+
+	@Test
+	void testMissingClassificationListsYieldZeroScore()
+	{
+		// The LLM may omit lists entirely; this must not throw.
+		when(mockBot.classifyClaims(GROUND_TRUTH, ANSWER))
+			.thenReturn(new ClaimClassification());
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		assertEquals(0.0, result.getValue(), 0.001);
 	}
 
 	@Test
