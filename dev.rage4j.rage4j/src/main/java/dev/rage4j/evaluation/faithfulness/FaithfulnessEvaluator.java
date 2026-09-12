@@ -3,8 +3,10 @@ package dev.rage4j.evaluation.faithfulness;
 import dev.langchain4j.data.message.ImageContent;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.service.AiServices;
+import dev.langchain4j.service.output.OutputParsingException;
 import dev.rage4j.evaluation.Evaluation;
 import dev.rage4j.evaluation.Evaluator;
+import dev.rage4j.evaluation.model.InferenceVerdict;
 import dev.rage4j.model.Rage4jImage;
 import dev.rage4j.model.Sample;
 import dev.rage4j.util.VisionModelGuard;
@@ -175,7 +177,39 @@ public class FaithfulnessEvaluator implements Evaluator
 	private long getInferredClaimsCount(String context, String[] claims, List<ImageContent> images)
 	{
 		return Arrays.stream(claims)
-			.filter(claim -> bot.canBeInferred(images, claim, context))
+			.filter(claim -> isInferred(images, claim, context))
 			.count();
+	}
+
+	/**
+	 * Asks the judge for its verdict on one claim: the structured answer first, and only when
+	 * that answer cannot be parsed or carries no value, the plain-text variant read by
+	 * {@link InferenceVerdictParser}. A structured answer that fails to parse is a formatting
+	 * failure of the judge, not a verdict, so it is retried in the other format rather than
+	 * counted; a transport failure (timeout, rejected request) is neither and propagates as it
+	 * is — a second call would only repeat it. A {@code null} verdict is treated exactly like an
+	 * unparsable one: a judge that answered {@code {"inferred": null}} gave no verdict, and
+	 * counting it as {@code false} would be an established "not inferred" nobody established.
+	 *
+	 * @throws OutputParsingException
+	 *             when the fallback answer carries no verdict either, or contradicts itself —
+	 *             the claim then has no verdict, and the sample no faithfulness value
+	 */
+	private boolean isInferred(List<ImageContent> images, String claim, String context)
+	{
+		try
+		{
+			InferenceVerdict verdict = bot.canBeInferred(images, claim, context);
+			if (verdict != null && verdict.inferred() != null)
+			{
+				return verdict.inferred();
+			}
+			LOG.warn("Structured verdict carried no value for claim '{}', falling back to the plain-text verdict", claim);
+		}
+		catch (OutputParsingException e)
+		{
+			LOG.warn("Structured verdict unparsable for claim '{}', falling back to the plain-text verdict: {}", claim, e.getMessage());
+		}
+		return InferenceVerdictParser.parse(bot.canBeInferredAsText(images, claim, context));
 	}
 }
