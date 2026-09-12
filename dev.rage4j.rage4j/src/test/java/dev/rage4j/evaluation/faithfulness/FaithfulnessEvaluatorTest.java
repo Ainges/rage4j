@@ -1,9 +1,11 @@
 package dev.rage4j.evaluation.faithfulness;
 
 import dev.langchain4j.data.message.ImageContent;
+import dev.langchain4j.service.output.OutputParsingException;
 import dev.rage4j.LoggingTestWatcher;
 import dev.rage4j.evaluation.Evaluation;
 import dev.rage4j.evaluation.model.ArrayResponse;
+import dev.rage4j.evaluation.model.InferenceVerdict;
 import dev.rage4j.model.Rage4jImage;
 import dev.rage4j.model.Sample;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -56,7 +59,7 @@ class FaithfulnessEvaluatorTest
 	void testEvaluateFaithfulness_FullMatch()
 	{
 		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
-		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(true);
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(new InferenceVerdict(true));
 
 		Evaluation result = evaluator.evaluate(sample);
 
@@ -68,8 +71,8 @@ class FaithfulnessEvaluatorTest
 	void testEvaluateFaithfulness_PartialMatch()
 	{
 		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris", "London" }));
-		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(true);
-		when(mockBot.canBeInferred(anyList(), eq("London"), anyString())).thenReturn(false);
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(new InferenceVerdict(true));
+		when(mockBot.canBeInferred(anyList(), eq("London"), anyString())).thenReturn(new InferenceVerdict(false));
 
 		Evaluation result = evaluator.evaluate(sample);
 
@@ -81,7 +84,7 @@ class FaithfulnessEvaluatorTest
 	void testEvaluateFaithfulness_NoMatch()
 	{
 		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "London", "Berlin" }));
-		when(mockBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(false);
+		when(mockBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(new InferenceVerdict(false));
 
 		Evaluation result = evaluator.evaluate(sample);
 
@@ -166,7 +169,7 @@ class FaithfulnessEvaluatorTest
 			.build();
 
 		when(visionBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
-		when(visionBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(true);
+		when(visionBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(new InferenceVerdict(true));
 
 		Evaluation result = visionEvaluator.evaluate(sampleWithImages);
 
@@ -188,7 +191,7 @@ class FaithfulnessEvaluatorTest
 		FaithfulnessEvaluator visionEvaluator = new FaithfulnessEvaluator(visionBot, true);
 
 		when(visionBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
-		when(visionBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(true);
+		when(visionBot.canBeInferred(anyList(), anyString(), anyString())).thenReturn(new InferenceVerdict(true));
 
 		Evaluation result = visionEvaluator.evaluate(sample);
 
@@ -196,5 +199,87 @@ class FaithfulnessEvaluatorTest
 		ArgumentCaptor<List<ImageContent>> imageCaptor = ArgumentCaptor.forClass(List.class);
 		verify(visionBot).canBeInferred(imageCaptor.capture(), anyString(), anyString());
 		assertTrue(imageCaptor.getValue().isEmpty());
+	}
+
+	// --- structured verdict first, plain-text verdict as the net --------------------------
+
+	@Test
+	void structuredVerdictIsUsedWithoutAskingForText()
+	{
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(new InferenceVerdict(true));
+
+		evaluator.evaluate(sample);
+
+		verify(mockBot, never()).canBeInferredAsText(anyList(), anyString(), anyString());
+	}
+
+	@Test
+	void unparsableStructuredVerdictFallsBackToTheTextVerdict()
+	{
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris", "London" }));
+		when(mockBot.canBeInferred(anyList(), anyString(), anyString()))
+			.thenThrow(new OutputParsingException("Failed to parse \"{\"inferred\": true}\n{\"inferred\": true}\"", null));
+		// the shape gpt-oss writes: the word twice, one per line — accepted by the parser
+		when(mockBot.canBeInferredAsText(anyList(), eq("Paris"), anyString())).thenReturn("true\ntrue");
+		when(mockBot.canBeInferredAsText(anyList(), eq("London"), anyString())).thenReturn("false\nfalse");
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		assertEquals(EXPECTED_SCORE_PARTIAL_MATCH, result.getValue());
+		verify(mockBot, times(2)).canBeInferredAsText(anyList(), anyString(), anyString());
+	}
+
+	@Test
+	void nullStructuredVerdictIsNoVerdictAndFallsBackToTheTextVerdict()
+	{
+		// {"inferred": null} is legal under a strict schema; it must not count as false
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(new InferenceVerdict(null));
+		when(mockBot.canBeInferredAsText(anyList(), eq("Paris"), anyString())).thenReturn("true");
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		assertEquals(EXPECTED_SCORE_FULL_MATCH, result.getValue());
+	}
+
+	@Test
+	void missingStructuredVerdictObjectFallsBackToTheTextVerdict()
+	{
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(null);
+		when(mockBot.canBeInferredAsText(anyList(), eq("Paris"), anyString())).thenReturn("false");
+
+		Evaluation result = evaluator.evaluate(sample);
+
+		assertEquals(EXPECTED_SCORE_NO_MATCH, result.getValue());
+	}
+
+	@Test
+	void contradictoryTextVerdictLeavesTheSampleWithoutAValue()
+	{
+		// one claim without a verdict is a sample without a faithfulness value — never a partial score
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris", "London" }));
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString())).thenReturn(new InferenceVerdict(true));
+		when(mockBot.canBeInferred(anyList(), eq("London"), anyString()))
+			.thenThrow(new OutputParsingException("unparsable", null));
+		when(mockBot.canBeInferredAsText(anyList(), eq("London"), anyString())).thenReturn("false\ntrue");
+
+		OutputParsingException e = assertThrows(OutputParsingException.class, () -> evaluator.evaluate(sample));
+
+		assertTrue(e.getMessage().contains("false\ntrue"), "the raw judge text must travel with the failure");
+	}
+
+	@Test
+	void transportFailureOfTheStructuredCallIsNotRetriedAsText()
+	{
+		// a timeout or a rejected request is not a formatting problem: a second call in another
+		// format would only repeat it, and hide which failure class it was
+		when(mockBot.extractClaims(ANSWER)).thenReturn(new ArrayResponse(new String[] { "Paris" }));
+		when(mockBot.canBeInferred(anyList(), eq("Paris"), anyString()))
+			.thenThrow(new IllegalStateException("Input length exceeds model's maximum context length"));
+
+		assertThrows(IllegalStateException.class, () -> evaluator.evaluate(sample));
+		verify(mockBot, never()).canBeInferredAsText(anyList(), anyString(), anyString());
 	}
 }
